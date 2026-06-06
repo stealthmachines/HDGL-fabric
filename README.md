@@ -1,3 +1,5 @@
+<img width="628" height="665" alt="image" src="https://github.com/user-attachments/assets/6b914d55-c8f3-447f-aff5-0bb2b497ce4f" />
+
 # ALL YOUR BASE ARE BELONG TO US, as it were.
 
 SUITE.hdgl is the document to read first — it is itself a valid .hdgl file containing the complete file tree, all six integration seams, the full build procedure, and the two-node test guide. Because it's .hdgl, the running fabric can load and parse it. It is both the manual and a payload.
