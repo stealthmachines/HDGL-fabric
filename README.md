@@ -1,4 +1,4 @@
-ALL YOUR BASE ARE BELONG TO US, as it were.
+# ALL YOUR BASE ARE BELONG TO US, as it were.
 
 SUITE.hdgl is the document to read first — it is itself a valid .hdgl file containing the complete file tree, all six integration seams, the full build procedure, and the two-node test guide. Because it's .hdgl, the running fabric can load and parse it. It is both the manual and a payload.
 The suite divides cleanly into two layers:
@@ -9,7 +9,7 @@ C layer — everything else. Exists only for the POSIX transport daemon and host
 
 The build is three shell commands: bash build.sh for the image, make for the daemon, dd to flash. The two-node test produces GENOME-LOCK within three gossip cycles — about twelve seconds after the second node boots — at which point all three carrier channels are live and the fabric store is accepting payloads.
 
-NEW THIS VERSION
+# NEW THIS VERSION
 
 What the file contains
 1462 lines, zero third-party dependencies. Everything either re-implements a primitive from your C layer or delegates to Node builtins.
