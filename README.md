@@ -1,143 +1,185 @@
-# HDGL Analog Fabric — Consolidated Suite
-**Expert Analysis & Reference Document**
+# HDGL Router64 — Boot Chain Fix (MBR → Stage2 → Runtime64)
 
-## OVERVIEW
-This is a single-file consolidation of the metal_fabric.zip suite - a complete OS, manual, and valid payload in one file. Targets:
-- **QEMU**: qemu-system-x86_64 with i440FX machine and e1000 NIC
-- **METAL**: Gigabyte H81-BTC-Pro (Haswell PCH), Intel i217-V (8086:153A)
+Three bugs were found and fixed by actually booting the chain in QEMU with
+COM1 captured to a serial console, rather than by static read-through. All
+three were invisible in the source and only surfaced at execution time.
 
----
+## Bug 1 — MBR clobbers the boot drive number before reading the disk
 
-## CONSOLIDATION CHANGES (Key Modifications from Original)
-1. **Unified Glyph Trees**: All glyph trees merged into one file with parent references
-2. **BAR64 Fix**: Corrected i217-V 64-bit MMIO BAR read (was sign-extend error)
-3. **RCTL Fix**: Changed from 0x8002 → 0x8802 (fixes BSIZE interpretation for 82579/i217)
-4. **Extended Smoke Test**: Added RTL8139 QEMU test and metal probe target
-5. **Memory Map Clarification**: 
-   - 0x101208: live gossip_fingerprint (updated each cycle)
-   - 0x1013FC: phi-lattice slot 127 = cached genome_fp (set once at boot)
-6. **Collapsed Duplicate**: Removed duplicate smoke_test glyph
-7. **Makefile Extensions**: Added carrier_test, fabric_test, metal targets
-8. **Test Files**: hdgl_genome_test.c, hdgl_fabric_test.c, zchg_carrier_test.c referenced
+`mbr.asm` prints an "AXIOM" banner over COM1 before issuing `int 0x13` to
+load stage2. The banner code does `mov dx, 0x3F8` to address the UART, and
+`.com1_tx` only saves/restores `dx` *within its own call* — it never
+restores the BIOS-supplied boot drive number that arrives in `DL` at entry.
+By the time `int 0x13` runs, `DL` has been left at `0xF8` (the low byte of
+`0x3F8`) instead of `0x80`, so every disk read fails with an invalid-drive
+error.
 
----
+Confirmed by a throwaway debug MBR that printed `DL` and the `int 0x13`
+error code directly: `DL` arrived correctly as `80` from BIOS, but was gone
+by the time of the read in the original code.
 
-## ARCHITECTURE PARTS
+**Fix:** latch `dl` into a `boot_drive` byte immediately on entry (before
+any COM1 calls), and reload it into `dl` immediately before `int 0x13`.
 
-### PART I — UNIVERSAL CONSTANTS
-**Mathematical Foundation**:
-- φ (Golden Ratio) = 1.6180339887498948
-- Axis: A=0, C=1, G=2, T=3
-- **carrier_constants** = floor(2³²/φ) derived values:
-  - PHI32 = 0x9E3779B9 (Knuth multiplicative hash)
-  - FIB32 = 0x9E3779B1 (nearest prime)
-  - SQRT_PHI32 = 0xA17F0BCB
-  - PHI32_INV = 0x144CBC89
+## Bug 2 — `.com1_hex_dword` rotates the wrong register width
 
-### PART II — PHI-FOLD CARRIER PRIMITIVE
-**Core Encryption/Obfuscation**:
-- **phi_fold(x, key, seq)** = (x·PHI32 + key·FIB32 + seq·SQRT_PHI32) mod 2³²
-- **Three Carriers**:
-  - CH-0: 4 bytes/frame (reserved field in zchg_frame_header) = 800KB/sec covert channel
-  - CH-1: 2 bytes/gossip (LSB-2 bits of strand_weights) = 16 bits per message
-  - CH-2: /serve/<path> phi-sequence (1 bit/request via HTTP paths)
+The hex-dword print routine did:
 
-### PART III — BASE-4 CODEC
-**DNA-inspired Codec**:
-- TYPE → DNA mapping with energetic affinity:
-  - CPU/RUNTIME → A (purine, high-energy)
-  - MEM → C (pyrimidine, structural)
-  - IO → G (purine, bridging)
-  - COMPILER/STOR → T (pyrimidine, templating)
-- Codon = 3-mer of consecutive Omega nodes
-- K-mer = 4-mer (256 possibilities)
+```asm
+mov rbx, rax      ; 64-bit register
+mov ecx, 8
+.chd_loop:
+    rol rbx, 4    ; rotates the 64-bit register
+    ...
+    loop .chd_loop
+```
 
-### PART IV — GENOME FABRIC ENGINE
-**Runtime Configuration Derived from Omega Graph**:
-Memory Layout (Identity-mapped):
-- 0x101100: GenomeFabricConfig (16 bytes)
-- 0x101200: gossip_dn_ema (8 bytes, EMA of peer aggregates)
-- 0x101208: gossip_fingerprint (4 bytes, live)
-- 0x1013FC: phi-lattice slot 127 = genome_fp cache (stable)
-- 0x200000: OMEGA_BASE (graph storage)
+`mov eax, ...` zero-extends the upper 32 bits of `rax`, so a 32-bit value
+loaded this way sits in the low half of a 64-bit register. Rotating that
+64-bit register by 4 bits, 8 times, only rotates it 32 of its 64 positions
+— half a turn. The actual data never reaches the low nibble in 8 steps, so
+every digit read back as `0`. In context this silently printed `genome_fp`
+as `00000000`, which reads exactly like a plausible (if uninteresting)
+passing value rather than an obvious failure.
 
-**Key Derived Values**:
-- points_per_tick = 100 + (phi_lattice_mean & 0xFFFF) * 500 / 65535
-- strand_count = nearest_pow2(gc_content * n_nodes, 8, 256)
-- core_radius = popcount(dn_aggregate) * φ / 32
-- genome_fp = FNV_PHI_SPIRAL(base4_seq, dn_aggregate)
+**Fix:** operate on `ebx`/`rol ebx, 4` (32-bit) instead of `rbx`/`rol rbx, 4`.
 
-### PART V — NIC DRIVER
-**Complete NIC Driver for e1000 and RTL families**
+## Bug 3 — empty string literal aliases the next label
 
-**Memory Map**:
-- 0x105000: NIC driver state (512 bytes)
-- 0x106000: TX ring (256 bytes)
-- 0x107000: RX ring (256 bytes)
-- 0x108000: TX buffers (32KB)
-- 0x110000: RX buffers (32KB)
+```asm
+.msg_genome_fp    db ""   ; placeholder — computed inline
+.msg_prompt       db "Router64> ", 0
+```
 
-**Critical H81-BTC Fixes**:
-1. BAR64 detection and combination for i217-V
-2. RCTL corrected: 0x8002 → 0x8802 (BSIZE=01b for 2KB buffers)
+`db ""` emits zero bytes. `.msg_genome_fp` therefore points to the exact
+same address as `.msg_prompt` — it isn't an empty string, it's the *same*
+string. The `lea rsi, [rel .msg_genome_fp] / call .com1_str` step printed
+`"Router64> "` early, in the middle of the final banner, before the actual
+hex digits.
 
-**Register Offsets**:
-- e1000: E1000_CTRL, E1000_RCTL, E1000_TCTL, E1000_TDLEN, etc.
-- RTL8111: RTL_CMD, RTL_RCR, RTL_TCR, RTL_IDR0, etc.
+**Fix:** the placeholder served no purpose (the hex value is printed
+separately by `.com1_hex_dword` right after); removed the dead label and
+the print call referencing it.
 
-### PART VI — NIC TIMING
-- e1000 reset wait using phi_tick
-- RTL version detection from TXCFG register
-- Header offset detection (0 or 4 bytes)
+## Verified output (QEMU, e1000 NIC, COM1 → stdio, canonical 66-sector layout)
 
-### PART VII — PEER DISCOVERY
-**Three-Phase Discovery**:
-1. **Phi-seed Multicast**: mcast_ip = 0xEF000000 | (phi_fold(genome_fp, 0, 0) & 0x00FFFFFF), port 8090
-2. **ARP Probe**: Fallback for different subnets (10.0.0.1-254)
-3. **Sector-68 Static Peers**: Build-time LN_SEED_PEERS from disk
+```
+AXIOM
+S2
+RT
+PM
+LM
+[Omega] Omegan+1=T(Omegan) axiom: RUNTIME
+  [T1] phi constants (PHI32, PHI32_INV)... PASS
+  [T2] zero-clear via mov not xor... PASS
+  [T3] PCI NIC scan... (Intel e1000) PASS
+  [T4] VGA split chrome... PASS
+  [T5] IPC ring init... PASS
+  [T6] phi-distance GENOME-LOCK... PASS
+  [T7] phi_tick loop (3 ticks)...
+    tick=1
+    tick=2
+    tick=3
+PASS
+  [T8] genome_fp -> 0x101208/0x1013FC/FABRIC_READY... PASS
+[Fabric] ready  nic=1  store=open  genome_fp=0x779B1000
+Router64> 
+```
 
-**Peer Table** (0x119800):
-- 16 entries × 16 bytes = {uint32 ip, uint16 port, uint8[10] pad}
+`genome_fp = 0x779B1000` matches the hand-derived expectation in the
+source comments: `phi_fold(dn_aggregate=0, phi_lattice_mean=0x1000, seq=0)`
+= lower 32 bits of `0x9E3779B1 * 0x1000` — and per Part II's
+`PHI_FOLD_FORWARD` definition (`fold(x,key,seq) = x·PHI32 + key·FIB32 +
+seq·SQRT_PHI32 mod 2³²`), which this matches exactly with `x=0,
+key=phi_lattice_mean, seq=0`.
 
-### PART VIII — BOOTSTRAP GLOBALS
-- GENOME_FP_ADDR = 0x1013FC (phi-lattice slot 127)
-- FABRIC_READY_FLAG = 0x101014 bit 5
-- **INVARIANT**: genome_fp at 0x1013FC is boot-time stable; gossip_fingerprint at 0x101208 is live
+## Reconciled against the canonical spec (HDGL_CONSOLIDATED_V2.hdgl)
 
-### PART IX — BARE-METAL STORE
-**Persistent Storage**:
-- Sector 69: store header (strand_count, record_count, genome_fp)
-- Sectors 70+: strand data (64 sectors/strand × 512 = 32KB/strand)
-- ARENA_BASE = 0x400000 (4MB arena)
-- Magic: "ZCHG" (0x47484347 LE)
+The three bugs above were found purely by booting the chain — independent
+of any spec. Separately, this revision also reconciles the boot chain
+against `HDGL_CONSOLIDATED_V2.hdgl` (Parts XII, XIII, IV, VIII), which the
+original three sources had diverged from in three ways:
 
-### PART X — GENOME BOOT HOOK
-**Bootstrap Sequence**:
-1. Compute phi_lattice_mean from slots 0-3
-2. Count active Omega nodes
-3. Derive fabric config at 0x101100
-4. Initialize gossip_fingerprint
-5. Store genome_fp to slot 127 (0x1013FC)
+**Disk sector layout.** Part XII (`disk_image`) specifies sector 0 = MBR,
+sector 1 = stage2 (exactly one sector), sectors 2–65 = runtime64 (64
+sectors). The original sources had stage2 at 3 sectors and runtime64
+starting at LBA 4. Stage2's real code footprint is 446 bytes — it fits
+the canonical single sector with room to spare. `mbr.asm` now reads only
+1 sector for stage2; `stage2.asm` now reads runtime64 from LBA 2 (CHS
+sector 3), 64 sectors, matching Part XII exactly. `disk.img` is now
+33792 bytes (66 sectors) instead of 34816.
 
-### PART XI — SHELL COMMAND EXTENSIONS
-**New Commands**:
-- genome, fabric, ftick, fgossip, fauth, nic2, store, peers, send, load
+**genome_fp memory wiring.** Parts IV/VIII/XIII define a real memory map
+for this value: `0x101208` = `gossip_fingerprint` (live, written by fabric
+init), `0x1013FC` = phi-lattice slot 127 (boot-stable cache, written once
+by `.store_genome_fp_in_lattice`), and bit 5 of `0x101014` = the
+`FABRIC_READY` flag. The original `runtime64.asm` computed `genome_fp` in
+a register and printed it directly — it never touched any of those three
+addresses. `runtime64.asm` now writes the computed value to `0x101208`,
+calls a `.store_genome_fp_in_lattice` routine reproduced verbatim from
+Part VIII's emit block (copies `0x101208` → `0x1013FC`, sets the
+`FABRIC_READY` bit), and the final banner now reads `genome_fp` back from
+`0x101208` rather than a register — matching `.boot_complete_init` (Part
+XIII) exactly. A new **T8** test verifies all three writes landed
+correctly.
 
----
+One pre-existing, harmless overlap: T7's `phi_tick` counter uses
+`0x101010` as an ad-hoc scratch qword (not a canonical address) that
+happens to span into `0x101014` where `FABRIC_READY` lives. T7 completes
+before T8 runs, so this is inert, and it's commented in the source so
+it isn't mistaken for a real collision later.
 
-## KEY INVARIANTS
-1. **Peer Discovery**: 
-   - Reads live gossip from 0x101208
-   - Reads stable index from 0x1013FC
-2. **BAR64**: Bits 2:1 of BAR0 = 10b indicates 64-bit BAR
-3. **EMA Alpha**: φ/(φ+1) ≈ 0.618 for natural weighting
-4. **Phi-fold Bijection**: Every (x, key, seq) maps to unique fold value
+**Target hardware.** The spec's actual target is a **Gigabyte H81-BTC-Pro
+/ B85-BTC / Z87-BTC** (Haswell PCH mining board) with an **Intel i217-V
+NIC (8086:153A)** — not PCEngines APU or Protectli. See `INSTRUCTIONS.md`
+for the corrected hardware section (BIOS settings, serial, NIC notes).
 
----
+**Not wired in — flagged, not attempted.** Part V defines the real e1000
+register-level driver, including two hardware fixes specific to the
+i217-V/82579 family: BAR64 handling (its BAR0 is a 64-bit BAR — read
+BAR0+BAR1 and combine for the true MMIO base) and an RCTL correction
+(`0x8002` → `0x04008802`, BSIZE=01b for 2KB buffers on this NIC family,
+versus older e1000 parts). T3 in this smoke test only confirms a NIC's
+vendor ID is visible on the PCI bus via config-space read — it does not
+program any NIC registers. Implementing the real driver is a
+substantially larger task than the boot-chain fixes here and wasn't
+attempted; flagging it explicitly so it isn't mistaken for done.
 
-## IMPLEMENTATION NOTES
-- ASM code uses identity-mapped memory for bare-metal compatibility
-- QEMU and metal targets both supported
-- All config derived from Omega graph (no hardcoded values)
-- Covert channels operate at network layer without detection
-- Supports Intel e1000 family + Realtek RTL8111/8168/8169 + Atheros AR8131
+
+
+```
+src/mbr.asm          corrected MBR (Bug 1 fix + canonical 1-sector stage2 read)
+src/stage2.asm        canonical 1-sector stage2 — A20/PM/LM, loads runtime64
+                       from canonical LBA 2 (was LBA 4)
+src/runtime64.asm     corrected runtime (Bug 2 + Bug 3 fixes) + genome_fp
+                       wired into canonical memory map (0x101208/0x1013FC/
+                       FABRIC_READY) + new T8 verification test
+bin/mbr.bin           512 bytes, assembled
+bin/stage2.bin        512 bytes, assembled (canonical 1 sector)
+bin/runtime64.bin     32768 bytes, assembled
+bin/disk.img          33792 bytes — cat of the three .bin files in boot
+                       order (66 sectors, matches Part XII exactly)
+```
+
+## Rebuilding and testing
+
+```sh
+nasm -f bin src/mbr.asm       -o bin/mbr.bin
+nasm -f bin src/stage2.asm    -o bin/stage2.bin
+nasm -f bin src/runtime64.asm -o bin/runtime64.bin
+cat bin/mbr.bin bin/stage2.bin bin/runtime64.bin > bin/disk.img
+
+# Pad to give SeaBIOS a standard CHS geometry under headless QEMU; not
+# needed in your existing image/Makefile if it already targets a larger
+# raw image or uses -drive ...,cyls=,heads=,secs= explicitly.
+truncate -s 10M bin/disk.img
+
+qemu-system-x86_64 -drive file=bin/disk.img,format=raw,if=ide \
+    -nographic -no-reboot -serial mon:stdio
+```
+
+On real H81-BTC-Pro/B85-BTC/Z87-BTC hardware (the spec's actual target —
+see `INSTRUCTIONS.md` §4) the boot-drive issue (Bug 1) would have
+manifested identically, since it's a BIOS-contract bug, not a QEMU
+artifact — worth flagging as the highest-priority fix of the three for
+metal bring-up.
